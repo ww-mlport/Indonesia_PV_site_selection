@@ -1,0 +1,1000 @@
+---
+title: "Indonesia Solar PV Power Plant (PP) Site Suitability Analysis"
+warning: false
+message: false
+---
+## Description:
+### Aim
+Based on an analysis of projected electricity demand, renewable electricity supply targets and existing, planned and under-construction renewable generation, Indonesia will require 27GW of installed solar PV power plants (PP) capacity by 2030.
+This analysis uses a multi-criteria decision making (MCDM) analysis to recommend sites for solar PP development in Indonesia. A financial analysis is conducted to recommend the projects.
+
+### Method
+
+The analysis follows these key steps:
+
+1. Create Restricted Layer - NO solar PPs
+
+2. Create Suitability Layer - Rated areas most suitable for development
+
+3. Exclude restricted areas from Suitability Layer and reclassify
+
+4. Site Selection - select top sites for required capacity
+
+5. Financial Analysis
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(sf)
+library(tmap)
+library(gstat)
+library(terra)
+library(ncdf4)
+library(RColorBrewer)
+library(sp)
+library(osmdata)
+library(ggplot2)
+
+## load Indonesia map
+imap <- st_read("idn_admbnda_adm0_bps_20200401.shp")
+#Protected/sensitive areas
+psa1 <- st_read(paste0(wd,"zero/WDPA_WDOECM_Apr2023_Public_IDN_shp-polygons.shp"))
+psa2 <- st_read(paste0(wd,"one/WDPA_WDOECM_Apr2023_Public_IDN_shp-polygons.shp"))
+psa3 <- st_read(paste0(wd,"two/WDPA_WDOECM_Apr2023_Public_IDN_shp-polygons.shp"))
+
+pop <- rast("idn_bsgme_v0a_100m_2020.tif")
+lu <- rast("indonesia_lu.tif")
+alt_r <- rast("IDN_msk_alt.vrt")
+roads_d <- rast("roads_d.tif")
+power_dm <- rast("power_dm.tif")
+pow_r <- rast("pow_r.tif")
+pop_dm <- rast("pop_dm.tif")
+idw_t <- rast("idw_t.tif")
+idw <- rast("idw.tif")
+top_sites_read <- st_read("top_sites_points.shp")
+
+```
+
+# Setup
+Load map data, set bounding box, create Indonesia map raster layer
+Resolution set to ~11km2. This enables each pixel to potentially contain a solar PP of this size.
+
+```{r, warning=FALSE, message=FALSE}
+
+#get bbox of indonesia map
+bbox <- st_bbox(imap)
+#set bbox of indonesia map
+xmin <- 95.01079
+ymin <- -11.00762
+xmax <- 141.01940
+ymax <- 6.07693
+#set the resolution
+#selected to provide approximately 11km2 resolution 
+res <- c(0.031, 0.031)
+#create blank raster with bbox of imap and res as above
+raster_template <- rast(resolution = res,
+                        xmin=xmin, ymin=ymin ,xmax=xmax, ymax=ymax ,
+                        crs = "WGS84")
+#convert i_map to raster
+imap_r <- rasterize(imap, raster_template)
+#plot indonesia raster
+tmap_mode("view")
+tm_shape(imap)+tm_polygons()
+```
+
+# 1. Restricted Layers - NO PV in these areas
+## Protected/Sensitive Areas
+Including national parks and important areas of biodiversity, wildlife conservation and heritage
+
+```{r, warning=FALSE, message=FALSE}
+
+#combine all
+psa <- rbind(psa1, psa2, psa3)
+#rasterize psa
+psa_r <- rasterize(psa, raster_template)
+#reclassify zones to 0
+psa_m <- matrix(c(1, 1, 0),
+                     ncol=3, byrow=TRUE)
+psa_rc <- classify(psa_r, psa_m, include.lowest=TRUE)
+#plot
+#tmap_mode("view")
+#tm_shape(psa_rc)+tm_raster()
+
+#plot map
+# tm_shape(imap_r)+
+#   tm_raster(legend.show = FALSE)+
+#   tmap_style("gray")+
+tm_shape(psa_rc)+
+  tm_raster(palette = "Set1", legend.show = TRUE)
+
+```
+
+## Population Centres
+Solar PPs not suitable for built-up areas
+
+```{r, warning=FALSE, message=FALSE}
+
+#match resolution to others
+pop_re <- resample(pop, raster_template, method = "bilinear")
+#matrix reclassification to exclude populated areas
+pop_m <- matrix(c(0, 0.1, NA,
+                  0.1, Inf, 0),
+                     ncol=3, byrow=TRUE)
+pop_rc <- classify(pop_re, pop_m, include.lowest=TRUE)
+#plot
+#tmap_mode("view")
+#tm_shape(pop_rc)+tm_raster()
+
+#plot map
+tm_shape(pop_rc)+
+  tm_raster(palette = "Set1", legend.show = TRUE)
+```
+
+## Land Use
+Forest and land used for crops exlcuded due to importance of agriculture to Indonesian economy
+
+```{r, warning=FALSE, message=FALSE}
+
+#match resolution to others
+lu_re <- resample(lu, raster_template, method = "bilinear")
+#mask for indonesia only
+lu_re <- mask(lu_re, imap_r)
+#create lu matrix - make forest and cropland unavailable
+lu_m <- matrix(c(0, 5, NA,
+                 5, 35, 0, #crops
+                 35, 45, NA,
+                 45, 95, 0, #forest
+                 95, Inf, NA),
+                ncol=3, byrow=TRUE)
+lu_rc <- classify(lu_re, lu_m, include.lowest=TRUE)
+#plot
+#tmap_mode("view")
+#tm_shape(lu_rc)+ tm_raster()
+
+#plot map
+tm_shape(lu_rc)+
+  tm_raster(palette = "Set1", legend.show = TRUE)
+
+```
+
+## Elevation
+Areas above 90m were restricted due to potentially high construction costs at higher elevations
+
+```{r, warning=FALSE, message=FALSE}
+
+# transform to same resolution
+alt_re <- resample(alt_r, raster_template, method = "bilinear")
+#remove values above 90m to avoid mountain areas
+alt_m <- matrix(c(-Inf, 0, NA,
+                   0, 90, NA,
+                   90, Inf, 0),
+                 ncol=3, byrow=TRUE)
+alt_rc <- classify(alt_re, alt_m, include.lowest=TRUE)
+#plot
+#tm_shape(alt_rc)+tm_raster(n=10)
+
+#plot map
+tm_shape(alt_rc)+
+  tm_raster(palette = "Set1", legend.show = TRUE)
+
+```
+
+## Slope
+Altitude layer is converted to slope in degree units using terrain() function in terra package.
+Whilst it is generally agreed that steep slopes can reduce solar power potential and number of installed solar panels, there is no consensus on the optimum threshold. However, this study has set the threshold at 5° above which PV deployment is restricted.
+
+```{r, warning=FALSE, message=FALSE}
+#convert alt to slope
+slope_r <- terrain(alt_r, v = "slope", unit = "degrees")
+# transform to same resolution
+slope_re <- resample(slope_r, raster_template, method = "bilinear")
+# select slopes less than 5
+slope_m <- matrix(c(-Inf, 0, NA,
+                  0, 5, NA,
+                  5, Inf, 0),
+                ncol=3, byrow=TRUE)
+slope_rc <- classify(slope_re, slope_m, include.lowest=TRUE)
+#plot
+#tm_shape(slope_rc)+tm_raster()
+
+#plot map
+tm_shape(slope_rc)+
+  tm_raster(palette = "Set1", legend.show = TRUE)
+```
+
+## Combined Restricted
+Combine all restricted layers
+
+```{r, warning=FALSE, message=FALSE}
+#put all in same stack
+cons <- c(psa_rc, pop_rc, lu_rc, alt_rc, slope_rc)
+names(cons) <- c("psa", "pop", "lu", "alt", "slope")
+#add an unsuitability layer
+unsuitability <- pop_rc
+values(unsuitability) <- NA
+unsuitability[pop_rc == 0] <- 0
+unsuitability[psa_rc == 0] <- 0
+unsuitability[lu_rc == 0] <- 0
+unsuitability[alt_rc == 0] <- 0
+unsuitability[slope_rc == 0] <- 0
+#add the unsuitablity layer onto cons
+cons <- c(cons, unsuitability)
+names(cons)[6] <- "unsuitability"
+#plot
+#plot(cons$unsuitability, col = "blue")
+#tm_shape(cons$unsuitability)+tm_raster()
+
+#plot map
+tm_shape(cons$unsuitability)+
+  tm_raster(palette = "Set1", legend.show = TRUE)
+
+```
+
+# 2. Suitability Criteria
+Depending on a literature review, each of the layers of suitability criteria below were reclassified into 9 classes
+from 1 – 9, where 1 = least suitable and 9 = most suitable for solar PPs.
+
+## Elevation
+Taking into account the 90m restriction, the atmosphere is thinner at higher elevations decreasing the reflection and absorption of solar radiation and increasing solar potential at higher elevations. Therefore, higher elevations below 90m are more suitable for solar PPs than lower elevations.
+
+```{r, warning=FALSE, message=FALSE}
+
+# transform to same resolution
+alt_re <- resample(alt_r, raster_template, method = "bilinear")
+# reclassify for 1 - 9 at 10m intervals
+alt_m2 <- matrix(c(-Inf, 0, NA,
+                   0, 10, 1,
+                   10, 20, 2,
+                   20, 30, 3,
+                   30, 40, 4,
+                   40, 50, 5,
+                   50, 60, 6,
+                   60, 70, 7,
+                   70, 80, 8,
+                   80, 90, 9,
+                   90, Inf, NA),
+                 ncol=3, byrow=TRUE)
+alt_rc2 <- classify(alt_re, alt_m2, include.lowest=TRUE)
+#plot
+#tm_shape(alt_rc2)+tm_raster(n=10)
+
+#plot map
+tm_shape(alt_rc2)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+## Slope
+Below the 5° restricted threshold flatter areas are more suitable than steeper areas.
+
+```{r, warning=FALSE, message=FALSE}
+#convert alt to slope
+slope_r <- terrain(alt_r, v = "slope", unit = "degrees")
+# transform to same resolution
+slope_re <- resample(slope_r, raster_template, method = "bilinear")
+# select slopes less than 5
+slope_m2 <- matrix(c(5, Inf, NA),
+                ncol=3, byrow=TRUE)
+slope_rc2 <- classify(slope_re, slope_m2, include.lowest=TRUE)
+# reclassify for 1 -9 at 1 degree intervals
+slope_m3 <- matrix(c(0, 1, 9,
+                     1, 2, 7,
+                     2, 3, 5,
+                     3, 4, 3,
+                     4, 5, 1),
+                 ncol=3, byrow=TRUE)
+slope_rc3 <- classify(slope_rc2, slope_m3, include.lowest=TRUE)
+#plot
+#tm_shape(slope_rc3)+tm_raster()
+
+#plot map
+tm_shape(slope_rc3)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+## Aspect
+South facing slopes are considered more suitable for solar PPs as they provide the best conditions for maximum power generation.
+
+```{r, warning=FALSE, message=FALSE}
+#convert alt to aspect
+aspect_r <- terrain(alt_r, v = "aspect")
+# transform to same resolution
+aspect_re <- resample(aspect_r, raster_template, method = "bilinear")
+#define aspects and reclassify (Ruiz et al. 2020)
+aspect_m <- matrix(c(00.0, 22.5, 9,
+                    337.5, 360, 9,
+                    157.5, 202.5, 9,
+                    22.5, 67.5, 5,
+                    112.5, 157.5, 5,
+                    202.5, 247.5, 5,
+                    292.5, 337.5, 5,
+                    67.5, 112.5, 1,
+                    247.5, 292.5, 1),
+                  ncol=3, byrow=TRUE)
+aspect_rc <- classify(aspect_re, aspect_m, include.lowest=TRUE)
+#plot
+#tm_shape(aspect_rc)+tm_raster(n=3)
+
+#plot map
+tm_shape(aspect_rc)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+## Roads
+NB: A raster layer computing the distance of each pixel from a road is created. However, due to the large computing time to run the distance function these lines are commented out. The road distance raster data saved previously is read in at start of analysis.
+
+Due to the large amount of personnel and equipment necessary to build a solar PP, good road access is critical to avoid additional road building costs. Therefore, areas closer to roads were considered more suitable than those further away.
+
+```{r, warning=FALSE, message=FALSE}
+
+#filter for only primary roads
+#roads <- filter(roads, F_CODE_DES == "Road")
+#rasterize roads
+#roads_r <- rasterize(roads, raster_template, touches = TRUE)
+#reclassify zones to 0
+#roads_m <- matrix(c(1, 1, 0),
+#                 ncol=3, byrow=TRUE)
+#roads_rc <- classify(roads_r, roads_m, include.lowest=TRUE)
+#calculate distance
+#roads_d <- distance(roads_rc, unit = "m")
+#save roads_d for later runs because of high res
+#writeRaster(roads_d, "roads_d.tif")
+
+# mask with indonesia map
+roads_dm <- mask(roads_d, imap_r)
+
+# reclassify - unable to do 10km areas as shown in (Ruiz et al. 2020)
+roads_m2 <- matrix(c(0, 10000, 9,
+                     10000, 20000, 8,
+                     20000, 30000, 7,
+                     30000, 40000, 6,
+                     40000, 50000, 5,
+                     50000, 60000, 4,
+                     60000, 70000, 3,
+                     70000, 80000, 2,
+                     80000, 90000, 1,
+                     90000, Inf, 0),
+                  ncol=3, byrow=TRUE)
+roads_rc2 <- classify(roads_dm, roads_m2, include.lowest=TRUE)
+#plot
+#tm_shape(roads_rc2)+tm_raster(n = 9, palette= "Blues", legend.show = TRUE)
+
+#plot map
+tm_shape(roads_rc2)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+## Power Infrastructure
+NB: As above for roads, a raster computing the distance of each pixel from power lines was created. Due to computing time, these lines are commented out and the previously saved raster is read in at the beginning of the analysis.
+
+The costs of installing new power infrastructure is high and therefore it is most cost-effective to build solar PPs near to existing power infrastructure. Areas closer to power lines were therefore considered more suitable than those farther away. Although not a restriction, to provide more informative classifications closer to power lines and to penalise long distances, the areas which were above 75% of all distances from the power lines were given the classification of 0.
+
+```{r, warning=FALSE, message=FALSE}
+#set bbox
+bbox <- c(95.01079, -11.00762, 141.01940, 6.07693)
+#set location
+loc <- opq(bbox)
+#add the power features
+#power <- add_osm_feature(loc, key = "power", value = "line") %>% 
+  #osmdata_sf()
+#extract power lines
+#power_lines <- power$osm_lines
+#create vector
+#vp <- vect(power_lines)
+#create raster with same res
+#rp <- rast(vp, resolution = res)
+#rasterize the power lines
+#pow_r <- rasterize(vp, rp)
+#save power osm data in case
+#writeRaster(pow_r, "pow_r.tif")
+#read in if osm not working
+
+#mask with indonesia map
+#pow_r <- resample(pow_r, raster_template)
+#pow_r <- mask(pow_r, imap_r)
+#calculate distance
+#power_d <- distance(pow_r, unit = "m")
+# resample to make same extent as indonesia map and then mask
+#power_d <- resample(power_d, imap_r)
+#power_dm <- mask(power_d, imap_r)
+#save power_dm for later runs because of high res
+#writeRaster(power_dm, "power_dm.tif")
+#read in future
+
+#summary stats
+#summary(values(power_dm))
+#boxplot(values(power_dm))
+#75% of values are under 137,630 so to provide more insight from classes
+pow_max <- 134749
+pow_min <- 0
+pow_class <- (pow_max-pow_min)/9#this is just min-max predicted divided by no of classes
+# reclassify 
+power_m <- matrix(c(0, 1*pow_class, 9,
+                    1*pow_class, 2*pow_class, 8,
+                    2*pow_class, 3*pow_class, 7,
+                    3*pow_class, 4*pow_class, 6,
+                    4*pow_class, 5*pow_class, 5,
+                    5*pow_class, 6*pow_class, 4,
+                    6*pow_class, 7*pow_class, 3,
+                    7*pow_class, 8*pow_class, 2,
+                    8*pow_class, 9*pow_class, 1,
+                    9*pow_class, Inf, 0),
+                  ncol=3, byrow=TRUE)
+power_rc <- classify(power_dm, power_m, include.lowest=TRUE)
+#plot
+#tm_shape(power_rc)+tm_raster()
+
+#plot map
+tm_shape(power_rc)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+# Population density
+NB: Commented out lines show code for raster creation, but are commented out due to high computation requirements. Previously saved raster loaded at beginning of analysis.
+The literature is divided over whether sites are better suited near to built settlements, where consumption is likely to be, or in remote areas to avoid local opposition and conflicts with urban land use. These decisions are taken depending upon local and country factors, therefore this study follows the suggested recommendations of previous studies in Indonesia; after excluding the built settlements, proximity to built settlements is considered a positive. To provide more informative classifications closer to the built settlements and to penalise long distances, the areas which were above 75% of all distances from the built settlements were given the classification of 0.
+
+```{r, warning=FALSE, message=FALSE}
+# run population restricted section above first
+#calculate distance
+#pop_d <- distance(pop_rc, unit = "m")
+#mask to indonesia map
+#pop_dm <- mask(pop_d, imap_r)
+#save pop_dm for later runs because of high res
+#writeRaster(pop_dm, "pop_dm.tif")
+#read in future
+
+#view stats
+#summary(values(pop_dm))
+## Reclassify population distance interpolation
+pmax <- 61013 # third quartile
+pmin <- 0
+p_class <- (pmax-pmin)/9 #this is just min-max predicted divided by no of classes
+# reclassify
+pop_m2 <- matrix(c(0, 0, NA,
+                   pmin, 1*p_class, 9,
+                   1*p_class, 2*p_class, 8,
+                   2*p_class, 3*p_class, 7,
+                   3*p_class, 4*p_class, 6,
+                   4*p_class, 5*p_class, 5,
+                   5*p_class, 6*p_class, 4,
+                   6*p_class, 7*p_class, 3,
+                   7*p_class, 8*p_class, 2,
+                   8*p_class, 9*p_class, 1,
+                   9*p_class, Inf, 0),
+                  ncol=3, byrow=TRUE)
+pop_rc2 <- classify(pop_dm, pop_m2, include.lowest=TRUE)
+#plot
+#tm_shape(pop_rc2)+tm_raster(n=9)
+
+#plot map
+tm_shape(pop_rc2)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+# Interpolation
+Available data for temperature and Surface Solar Irradiation Downwards (SSRD) was available as point measurements. Therefore an interpolation technique using Inverse Distance Weighting (IDW) was used. IDW uses a distance decay parameter to specify the impact of existing points on predicted points by distance. An elbow method was used in combination with calculation of the Root Mean Squared Error (RMSE) to find optimum parameters.
+
+NB: The line of code for interpolation for both temperature and SSRD are commented out due to the high computing power requirements. The previously saved layers are read in at the beginning of the analysis.
+
+#Temperature
+Average temperatures in Indonesia are similar year-round. Therefore, this study uses temperature data from a representative time in a representative month; 9am, February, in 2022. The efficiency of solar panels is impacted by temperature; decreasing above 25 degrees Celsius. Therefore, lower temperatures are considered more suitable than higher temperatures.
+
+```{r, warning=FALSE, message=FALSE}
+
+#ncatt_get(temperature,"t2m","units")
+#extract temperature layer
+#temp <- ncvar_get(temperature,"t2m")
+#plot slice
+#image(temp, col=rev(brewer.pal(10,"RdBu")))
+#get lon lat
+#lon_t <- ncvar_get(temperature, "longitude")
+#lat_t <- ncvar_get(temperature, "latitude")
+#create mat
+#lontlatt <- as.matrix((expand.grid(lon_t, lat_t)))
+#ssrd_vec_t <- as.vector(temp) #create vector
+#ssrd_df_t <- data.frame(cbind( lontlatt,ssrd_vec_t)) #create df
+#colnames(ssrd_df_t) <- c("lon", "lat", "temp") #change column names
+#ssrd_df_value_t <- na.omit(ssrd_df_t) #omit NAs
+#ssrd_sf_t <- st_as_sf(ssrd_df_value_t, coords = c("lon", "lat")) #set as spatial frame
+#st_crs(ssrd_sf_t) <- 4326 #set coordinates
+
+#Extract coordinates of ssrd_sf
+#ssrd_sf_t <- st_transform(ssrd_sf_t, 4326)
+#coor_t <- as.data.frame(st_coordinates(ssrd_sf_t))
+#ssrd_sf_t$x <- coor_t$X
+#ssrd_sf_t$y <- coor_t$Y
+#temp_nogeom <- st_drop_geometry(ssrd_sf_t) #get rid of geometry but keep all other attributes
+#temp_nogeom <- na.omit(temp_nogeom)
+
+##RMSE to find right number for IDP
+#RMSE
+#RMSE <- function(observed, predicted) {
+ # sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+#}
+#K fold cross validation
+#n_idp = 10 #examine power ranging from 1 to 10
+#n_fold =10
+
+#rmse <- rep(NA, n_fold) #generate 10 NA
+#set.seed(7713)
+#kf <- sample(1:n_fold, nrow(temp_nogeom), replace=TRUE)
+#va = data.frame( c(1:n_idp), NA)
+#colnames(va) =c("idp","rmse") 
+
+#for (j in 1:n_idp) 
+#{
+#  for (i in 1:n_fold) {
+#    test <- temp_nogeom[kf == 1, ]
+#    train <- temp_nogeom[kf != 1, ]
+#    gs <- gstat(formula=temp~1, locations=~x+y, data=train, nmax=Inf, set=list(idp=j))
+ #   pre = predict(gs, test, debug.level=0 )
+ #   rmse[i] <- RMSE(test$temp, pre$var1.pred)
+ # }
+ # va[j,2] = (mean(rmse))
+#}
+#results and visualise
+#va[which(va$rmse==min(va)),]
+#ggplot(va) +
+  #geom_point(aes(x = idp, y= rmse))+
+  #geom_hline(yintercept=min(va), linetype="dashed", color = "red")+
+  #theme_classic()
+
+# IDW analysis for point grid
+#gs_t <- gstat(formula=temp~1, locations=~x+y, data=temp_nogeom, nmax=Inf, set=list(idp=5))
+#data should be in data frame format
+#gs_t
+#interpolate result
+#idw_t <- interpolate(raster_template, gs_t, debug.level=0)
+#plot(idw_t)
+#save interpolated for future because of high res
+#writeRaster(idw_t, "idw_t.tif")
+#read in future
+
+#mask with imap
+idw_mask_t <- mask(idw_t, imap_r)
+names(idw_mask_t) = c( "predicted","observed")
+#Step 8.5 Visualise the results
+#tmap_mode("view")
+#tm_shape(idw_mask_t$predicted) + tm_raster(col="predicted", style = "quantile", palette= "Blues", legend.show = TRUE)
+#plot
+#tmap_mode("view")
+#tm_shape(ssrd_sf_t)+ tm_dots(col="ssrd", style = "quantile", size=.001, palette = "viridis")
+
+## Reclassify temperature
+#summary(values(idw_mask_t$predicted))
+max_t <- 303.4  
+min_t <- 282.0
+t_class <- (max_t-min_t)/9#this is just min-max predicted divided by no of classes
+# reclassify
+temp_m <- matrix(c(0, min_t, NA,
+                   min_t, min_t+t_class, 9,
+                   min_t+t_class, min_t+(2*t_class), 8,
+                   min_t+(2*t_class), min_t+(3*t_class), 7,
+                   min_t+(3*t_class), min_t+(4*t_class), 6,
+                   min_t+(4*t_class), min_t+(5*t_class), 5,
+                   min_t+(5*t_class), min_t+(6*t_class), 4,
+                   min_t+(6*t_class), min_t+(7*t_class), 3,
+                   min_t+(7*t_class), min_t+(8*t_class), 2,
+                   min_t+(8*t_class), Inf, 1),
+                  ncol=3, byrow=TRUE)
+temp_rc <- classify(idw_mask_t$predicted, temp_m, include.lowest=TRUE)
+#summary(temp_rc)
+#plot
+#tm_shape(temp_rc) + tm_raster(n = 9, palette= "Blues", legend.show = TRUE)
+
+#plot map
+tm_shape(temp_rc)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+## Solar interpolation
+
+SSRD is a key factor in solar PP power output. Solar radiation can vary throughout the year, however this study uses data from a representative date and time; 9am, July, 2022. (An improved methodology would use a larger sample of SSRD throughout the year).
+The original SSRD data is provided in joules per square metre, which was converted to kilowatt-hours per square metre (kWh/m2) prior to interpolation.
+
+
+```{r, warning=FALSE, message=FALSE}
+#Step 1. Import data
+#Step 2. Extract dimensions
+#lon <- ncvar_get(solar, "longitude")
+#lat <- ncvar_get(solar, "latitude")
+#Step 3. Extract variables
+#ssrd_array <- ncvar_get(solar,"ssrd")
+#Step 4. Take a single time-slice of the array
+#From assignment html: "Considering that this is a preliminary suitability analysis,
+#the consultant may select data on surface solar radiation downwards at a
+#representative time"
+#ssrd_slice <- ssrd_array[] #07/01/22 09:00:00 
+#Step 5. Plot slice
+#image(ssrd_slice, col=rev(brewer.pal(10,"RdBu")))
+#Step 6. Combine data for interpolation
+#lonlat <- as.matrix((expand.grid(lon, lat)))
+#ssrd_vec <- as.vector(ssrd_slice) #create vector
+#ssrd_df <- data.frame(cbind( lonlat,ssrd_vec)) #create df
+#colnames(ssrd_df) <- c("lon", "lat", "ssrd") #change column names
+#ssrd_df_value <- na.omit(ssrd_df) #omit NAs
+#ssrd_sf <- st_as_sf(ssrd_df_value, coords = c("lon", "lat")) #set as spatial frame
+#st_crs(ssrd_sf) <- 4326 #set coordinates
+#ssrd_sf <- st_transform(ssrd_sf, 4326)
+
+## convert to power
+#ncatt_get(solar,"ssrd","units")
+# an example of a 1m2 (A) solar panel
+#radiation_to_power <- function(G, A=1, r=0.175, p=0.6, hours=1){
+#  kWh <- G * A * r * p * (hours/3600) / 1000
+#  return(kWh)
+#}
+# Radiation data for solar electric (photovoltaic) systems are often represented as kilowatt-hours per square meter (kWh/m2)
+# 1 joule/m2 = 1/3600/1000 kWh / m2 (one 1KWh contains 3.6×106 Joules)
+#ssrd_kwh <- as.data.frame(radiation_to_power(ssrd_df_value))
+#ssrd_df_value <- cbind(ssrd_df_value,ssrd_kwh$ssrd)
+#colnames(ssrd_df_value) [4] <- 'ssrd_kwh'
+#ssrd_sf$ssrd_kwh = ssrd_kwh$ssrd
+
+#Step 7. Plot points
+#tm_shape(ssrd_sf)+tm_dots(col="ssrd_kwh", style = "quantile", size=.001, palette = "viridis")
+#Step 8. Interpolation
+#Step 8.1 extract coordinates of ssrd_sf
+#coor <- as.data.frame(st_coordinates(ssrd_sf))
+#ssrd_sf$x <- coor$X
+#ssrd_sf$y <- coor$Y
+#solar_nogeom <- st_drop_geometry(ssrd_sf) #get rid of geometry but keep all other attributes
+#solar_nogeom <- na.omit(solar_nogeom)
+##RMSE to find right number for IDP
+#RMSE
+#RMSE <- function(observed, predicted) {
+#  sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+#}
+#K fold cross validation
+#n_idp = 10 #examine power ranging from 1 to 10
+#n_fold =10
+
+#rmse <- rep(NA, n_fold) #generate 10 NA
+#set.seed(7713)
+#kf <- sample(1:n_fold, nrow(solar_nogeom), replace=TRUE)
+#va = data.frame( c(1:n_idp), NA)
+#colnames(va) =c("idp","rmse") 
+
+#for (j in 1:n_idp) 
+#{
+ # for (i in 1:n_fold) {
+  #  test <- solar_nogeom[kf == 1, ]
+   # train <- solar_nogeom[kf != 1, ]
+   # gs <- gstat(formula=ssrd~1, locations=~x+y, data=train, nmax=Inf, set=list(idp=j))
+  #  pre = predict(gs, test, debug.level=0 )
+   # rmse[i] <- RMSE(test$ssrd, pre$var1.pred)
+  #}
+#  va[j,2] = (mean(rmse))
+#}
+#results and visualise
+#va[which(va$rmse==min(va)),]
+#ggplot(va) +
+ # geom_point(aes(x = idp, y= rmse))+
+#  geom_hline(yintercept=min(va), linetype="dashed", color = "red")+
+ # theme_classic()
+
+#Step 8.2 do IDW analysis for point grid
+#gs <- gstat(formula=ssrd_kwh~1, locations=~x+y, data=solar_nogeom, nmax=Inf, set=list(idp=4))
+#data should be in data frame format
+#gs
+
+#Step 8.4 interpolate result
+#idw <- interpolate(raster_template, gs, debug.level=0)
+#plot(idw)
+#save interpolated for future because of high res
+#writeRaster(idw, "idw.tif")
+#read in future
+
+#mask with imap
+idw_mask <- mask(idw, imap_r)
+names(idw_mask) = c( "predicted","observed")
+#Step 8.5 Visualise the results
+#tmap_mode("view")
+#tm_shape(idw_mask$predicted) + tm_raster(col="predicted", style = "quantile", palette= "Blues", legend.show = TRUE)
+
+## Reclassify solar interpolation
+#summary(values(idw_mask$predicted))
+max <- 0.6
+min <- 0.1
+s_class <- (max-min)/9
+# reclassify
+solar_m <- matrix(c(min, min+s_class, 1,
+                    min+s_class, min+(2*s_class), 2,
+                    min+(2*s_class), min+(3*s_class), 3,
+                    min+(3*s_class), min+(4*s_class), 4,
+                    min+(4*s_class), min+(5*s_class), 5,
+                    min+(5*s_class), min+(6*s_class), 6,
+                    min+(6*s_class), min+(7*s_class), 7,
+                    min+(7*s_class), min+(8*s_class), 8,
+                    min+(8*s_class), Inf, 9),
+                  ncol=3, byrow=TRUE)
+solar_rc <- classify(idw_mask$predicted, solar_m, include.lowest=TRUE)
+#plot
+#tm_shape(solar_rc) + tm_raster(n = 9, palette= "Blues", legend.show = TRUE)
+
+#plot map
+tm_shape(solar_rc)+
+  tm_raster(n = 9, palette = "Purples", legend.show = FALSE)
+
+```
+
+# Multi-Criteria Decision Making (MCDM) - Analytic Hierarchy Process (AHP) Implementation
+MCDM is a way to make decisions based on multiple conflicting criteria. The analytic hierarchy process (AHP) is an MCDM tool which can be used to weight the importance of different criteria and provide an overall rating. In spatial GIS-based analysis, AHP is a popular MCDM tool in urban planning, land-use suitability and site selection and is used extensively for solar PV site selection.
+
+The weight for each category of the suitability layers were created using a pairwise comparison matrix using the fundamental scale. In the pairwise comparison matrix, each criteria is assessed against the other to give a relative value of importance. A normalised pairwise matrix is calculated and then the average taken across rows to obtain the relative criteria weights. Based on the literature review, the weightings below are in-line with similar studies.
+
+
+```{r, warning=FALSE, message=FALSE}
+#weights for each category
+solar_w <- 0.26
+temp_w <- 0.07
+alt_w <- 0.02
+slope_w <- 0.05
+asp_w <- 0.04
+pow_w <- 0.28
+roads_w <- 0.16
+pop_w <- 0.12
+#multiply each layer by the weights
+solar_l <- solar_w*solar_rc
+temp_l <- temp_w*temp_rc
+alt_l <- alt_w*alt_rc2
+slope_l <- slope_w*slope_rc3
+asp_l <- asp_w*aspect_rc
+pow_l <- pow_w*power_rc
+roads_l <- roads_w*roads_rc2
+pop_l <- pop_w*pop_rc2
+
+#sum all rasters together to give final value
+#define function
+add_rasters <- function(r1, r2, r3, r4, r5, r6, r7, r8) {
+  m1 <- terra::as.matrix(r1, wide = TRUE)
+  m1[is.na(m1)] <- 0
+  m2 <- terra::as.matrix(r2, wide = TRUE)
+  m2[is.na(m2)] <- 0
+  m3 <- terra::as.matrix(r3, wide = TRUE)
+  m3[is.na(m3)] <- 0
+  m4 <- terra::as.matrix(r4, wide = TRUE)
+  m4[is.na(m4)] <- 0
+  m5 <- terra::as.matrix(r5, wide = TRUE)
+  m5[is.na(m5)] <- 0
+  m6 <- terra::as.matrix(r6, wide = TRUE)
+  m6[is.na(m6)] <- 0
+  m7 <- terra::as.matrix(r7, wide = TRUE)
+  m7[is.na(m7)] <- 0
+  m8 <- terra::as.matrix(r8, wide = TRUE)
+  m8[is.na(m8)] <- 0
+  comb <- m1 + m2 + m3 + m4 + m5 + m6 + m7 + m8
+  comb[comb == 0] <- NA
+  
+  comb_rast <- rast(comb, extent = raster_template, crs = "+proj=longlat +datum=WGS84")
+  
+  return(comb_rast)
+}
+#call function
+comb_final <- add_rasters(solar_l,
+                          temp_l,
+                          alt_l,
+                          slope_l,
+                          asp_l,
+                          roads_l,
+                          pow_l,
+                          pop_l)
+#plot
+tm_shape(comb_final) + tm_raster(n = 9, palette= "Blues", legend.show = TRUE) + tmap_style("gray")
+```
+
+# 3. Mask Restricted Areas
+Overlay the restricted areas over the suitability criteria map and re-calculate suitability criteria values.
+
+```{r, warning=FALSE, message=FALSE}
+#extract unsuitable areas
+unsuit <- cons$unsuitability
+#make NA values 1 and 0 values NA
+unsuit[is.na(unsuit)] <- 1
+unsuit[unsuit == 0] <- NA
+#make same extent
+unsuit <- resample(unsuit, raster_template)
+comb_final <- resample(comb_final, raster_template)
+#mask
+restrict <- mask(comb_final, unsuit)
+#tm_shape(restrict) + tm_raster(n = 9, palette= "Blues", legend.show = TRUE)
+
+
+#change values to 1 - 9 suitability rating
+#summary(values(restrict))
+#hist(restrict)
+#create classes
+f_max <- 8.4
+f_min <- 0.0001
+f_class <- (f_max-f_min)/9
+# reclassify matrix
+f_m <- matrix(c(0, 0, NA,
+                    f_min, f_min+(1*f_class), 1,
+                    f_min+(1*f_class), f_min+(2*f_class), 2,
+                    f_min+(2*f_class), f_min+(3*f_class), 3,
+                    f_min+(3*f_class), f_min+(4*f_class), 4,
+                    f_min+(4*f_class), f_min+(5*f_class), 5,
+                    f_min+(5*f_class), f_min+(6*f_class), 6,
+                    f_min+(6*f_class), f_min+(7*f_class), 7,
+                    f_min+(7*f_class), f_min+(8*f_class), 8,
+                    f_min+(8*f_class), Inf, 9),
+                  ncol=3, byrow=TRUE)
+f_rc <- classify(restrict, f_m, include.lowest=TRUE)
+#plots
+#plot(f_rc)
+tm_shape(f_rc) + 
+  tm_raster(n = 9, palette= "Blues", legend.show = TRUE) + 
+  tmap_style("gray")
+
+```
+
+# 4. Site Selection
+Select the top sites which match the required solar PP installation target.
+
+```{r, warning=FALSE, message=FALSE}
+# size of pixel
+size <- cellSize(raster_template, mask=TRUE, unit="m", transform=TRUE, rcx=100)
+#summary(values(size))
+#extract solar power in kWh/m2
+sol_power <- idw_mask$predicted
+#get capacity per pixel
+energy <- sol_power
+area <- size
+efficiency <- 0.246
+# apply formula for GW
+capacity_GW <- (energy * area * efficiency) / 1000000
+#summary(values(capacity_GW))
+#plot
+# tm_shape(restrict) +   tm_raster(n = 9, palette= "Reds", legend.show = TRUE) + tmap_style("gray")
+
+#total capacity available
+total_capacity_available <- mask(capacity_GW, restrict)
+total_capacity_available_sum <- sum(values(total_capacity_available), na.rm = TRUE)
+total_capacity_available_sum_TW <- total_capacity_available_sum/1000
+
+#create vector of restricted sites
+sites_vector <- terra::as.matrix(restrict)
+#make a list of top sites by cell number
+top_cells <- c(690695, 632764, 596964, 635734, 635692,
+               133694, 152999, 632765, 617886, 631273,
+               114378, 206396, 133696, 43110, 130718,
+               226023, 588077, 588078, 589560)
+
+#591061
+top_sites <- raster_template
+top_sites[top_cells] <- 1
+#mask these to find capacity
+capacity_best <- mask(capacity_GW, top_sites)
+capacity_sum <- sum(values(capacity_best), na.rm = TRUE)
+#capacity_sum
+#cells(capacity_best)
+# #plot
+# tm_shape(capacity_best) + tm_raster(n = 2, palette= "RdGy", legend.show = TRUE) + tmap_style("gray")
+# 
+# #plot map
+# tm_shape(imap_r)+
+#   tm_raster(legend.show = FALSE)+
+#   tmap_style("gray")+
+#   tm_compass(size = 1, position=c("right", "top"))+
+#   tm_scale_bar(text.size = 0.25, position = c("left","bottom"))+
+#   tm_shape(top_sites)+
+#   tm_raster(n = 9, palette = "Reds", legend.show = TRUE)+
+#   tm_layout(legend.outside = TRUE,
+#             legend.outside.position = "bottom",
+#             legend.bg.color = "white",
+#             legend.title.color = "white",
+#             legend.frame = FALSE,
+#             legend.title.size = 0.01,
+#             legend.text.color = "black")
+
+#create vector layer for sites
+#top_sites_points <- terra::as.points(top_sites, values = TRUE, na.rm = TRUE)
+
+#Plot
+tmap_mode("view")
+# tm_shape(imap_r)+
+#   tm_raster(legend.show = FALSE)+
+#   tmap_style("grey")+
+#   tm_compass(position=c("right", "top"))+
+#   tm_scale_bar(text.size = 0.4, position = "left")+
+tm_shape(top_sites_read)+
+  tm_markers(col = "blue", scale = 0.4,  legend.show = TRUE)
+
+```
+
+# 5. Financial Analysis
+
+Run a financial analysis to evaluate CAPEX, Net Present Value (NPV), and LCOE, based on installed capacity, and assumed costs and revenues. Provide a final recommendation to the Indonesian government.
+
+
+```{r, warning=FALSE, message=FALSE}
+#find distance of top sites to grid
+grid_distance <- mask(power_dm, capacity_best)
+total_grid_distance <- (sum(values(grid_distance), na.rm = TRUE))/1000
+
+#Capital Expenditure (CapEx)
+#1) installation cost based on installed capacity
+installed_capacity_GW <- 27
+
+#2) the grid connection cost based on distance between power plants and their nearest grid
+grid_connection_cost_km <- 590 #USD/MW.km
+installed_capacity_MW <- installed_capacity_GW*1000
+capacity_installation_cost <- 1.16 #Million USD/MW installed power
+
+
+#total capex
+capex_solar_million_USD <- (installed_capacity_MW*capacity_installation_cost)+
+  (installed_capacity_MW*grid_connection_cost_km*total_grid_distance/1000000)
+capex_solar_USD <- capex_solar_million_USD*1000000
+capex_solar_billion_USD <- capex_solar_million_USD/1000
+
+#yearly revenue
+solar_capacity_factor <- 0.246
+annual_generation_MWh <- installed_capacity_MW*solar_capacity_factor*(365*24)
+annual_generation_GWh <- annual_generation_MWh/1000
+annual_generation_TWh <- annual_generation_MWh/1000/1000
+electricity_selling_price <- 103 #USD/MWh
+
+annual_revenue <- annual_generation_MWh*electricity_selling_price
+annual_revenue_billions <- annual_revenue/1000000000
+
+
+#2 Net Present Value (NPV)======
+#rep(10,4) #create a vector by repeating 10 4 times
+# output of the function above is: 10 10 10 10
+#seq( 1, 11, 2) #create a sequence of data start from 1 and end at 11. 2 is the increment of the sequence.
+#outout will be: 1 3 5 7 9 11
+
+calc_NPV <- function(annual_revenue, i=0.05, lifetime_yrs, CAPEX, OPEX=0){
+  costs_op <- rep(OPEX, lifetime_yrs) #operating cost
+  revenue <- rep(annual_revenue, lifetime_yrs) 
+  t <- seq(1, lifetime_yrs, 1) #output: 1, 2, 3, ...25
+  
+  NPV <- sum( (revenue - costs_op)/(1 + i)**t ) - CAPEX
+  return(round(NPV, 0))
+}
+npv <- calc_NPV(annual_revenue = annual_revenue,lifetime_yrs=25, CAPEX = capex_solar_USD)
+npv_billions <- npv/1000000000
+
+#3 Levelized cost of electricity (LCOE)=====
+#Life_span_generation_kWH is one of the required inputs to estimate the Levelized
+#cost of electricity (following function)
+Life_span_generation_kWH <- function (yearly_generation_kWH, discount = 0.08, lifetime_yrs = 25){
+  t<- seq(1, lifetime_yrs, 1)
+  L_S_G <- sum(yearly_generation_kWH/(1+discount)**t)
+  return (round(L_S_G,0))
+}
+
+#calculate Life_span_generation_kWH
+annual <- annual_generation_MWh*1000
+lsg <- Life_span_generation_kWH(yearly_generation_kWH=annual)
+
+LCOE <- function(NPV,Life_span_generation){
+  lcoe <- NPV/Life_span_generation
+  return(round(lcoe,2))
+}
+
+#calculate LCOE
+lcoe = LCOE(NPV=npv, lsg)
+#lcoe
+lcoe_MWh <- lcoe*1000
+
+print(paste("There is a total required new grid distance of", round(total_grid_distance,1),"km for",installed_capacity_GW,"GW of solar PV."))
+print(paste("Assuming a grid connection cost of", grid_connection_cost_km,"USD/MW/km and an installation cost of", capacity_installation_cost,"million USD/MW"))
+print(paste("Total Capex =", round(capex_solar_billion_USD,0),"billion USD"))
+print(paste("Assuming a capacity factor of", round((solar_capacity_factor*100),0),"% and an electricity selling price of ", electricity_selling_price,"USD/MWh"))
+print(paste("Annual generation of",format(round(annual_generation_GWh,0), big.mark = ","),"GWh gives annual revenue of", round(annual_revenue_billions,1),"billion USD"))
+print(paste("Assuming a discount rate of 8%. And a lifespan of 25 years"))
+print(paste("The LCOE =", lcoe_MWh, "USD/MWh"))
+print(paste("The Net Present Value (NPV) of investment =", round(npv_billions,0),"billion USD"))
+print(paste("Therefore the Indoensian government should",ifelse(npv>0, "support the construction of these solar PV plants")))
+
+```
+
+
